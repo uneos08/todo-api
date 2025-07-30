@@ -693,6 +693,9 @@ const docTemplate = `{
                 "done": {
                     "type": "boolean"
                 },
+                "photo_url": {
+                    "type": "string"
+                },
                 "title": {
                     "type": "string"
                 }
