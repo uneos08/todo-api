@@ -2,14 +2,21 @@ package handlers
 
 import (
 	"encoding/json"
+	"io"
 	"log"
 	"net/http"
+	"net/url"
+	"os"
 	"strconv"
 	"strings"
 
+	"todo-api/auth"
 	"todo-api/models"
 	"todo-api/store"
 
+	"path/filepath"
+
+	"github.com/google/uuid"
 	"github.com/gorilla/mux"
 )
 
@@ -29,7 +36,7 @@ func (h *TodoHandler) RegisterRoutes(r *mux.Router) {
 func (h *TodoHandler) handleTodos(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
-		h.getTodos(w)
+		h.getTodos(w, r)
 	case http.MethodPost:
 		h.createTodo(w, r)
 	default:
@@ -82,12 +89,20 @@ func writeGeneralResponse(w http.ResponseWriter, status, message string, data an
 // @Success      200  {object}  models.GeneralResponse{data=[]models.Todo}
 // @Failure      500  {object}  models.GeneralResponse
 // @Router       /todos [get]
-func (h *TodoHandler) getTodos(w http.ResponseWriter) {
-	todos, err := h.Store.GetTodos()
+func (h *TodoHandler) getTodos(w http.ResponseWriter, r *http.Request) {
+	claims, err := auth.ExtractClaimsFromRequest(r)
 	if err != nil {
+		writeGeneralResponse(w, "error", "Unauthorized", nil, http.StatusUnauthorized)
+		return
+	}
+
+	todos, err := h.Store.GetTodos(claims.UserID)
+	if err != nil {
+		log.Printf("❌ Failed to fetch todos from DB: %v", err)
 		writeGeneralResponse(w, "error", "Failed to fetch todos", nil, http.StatusInternalServerError)
 		return
 	}
+
 	writeGeneralResponse(w, "success", "Todos fetched", todos, http.StatusOK)
 }
 
@@ -102,12 +117,58 @@ func (h *TodoHandler) getTodos(w http.ResponseWriter) {
 // @Failure      500   {object}  models.GeneralResponse
 // @Router       /todos [post]
 func (h *TodoHandler) createTodo(w http.ResponseWriter, r *http.Request) {
-	var todo models.Todo
-	if err := json.NewDecoder(r.Body).Decode(&todo); err != nil {
-		writeGeneralResponse(w, "error", "Invalid JSON", nil, http.StatusBadRequest)
-		log.Printf("❌ Failed to create todo: %v", err)
+	err := r.ParseMultipartForm(10 << 20) // максимум 10MB
+	if err != nil {
+		log.Fatalf("❌ Failed to create uploads folder: %v", err)
+		writeGeneralResponse(w, "error", "Failed to parse form", nil, http.StatusBadRequest)
 		return
 	}
+
+	title := r.FormValue("title")
+	doneStr := r.FormValue("done")
+	done := doneStr == "true" || doneStr == "1"
+
+	// Получаем файл
+	file, handler, err := r.FormFile("photo")
+	var photoURL *string
+	if err == nil {
+		defer file.Close()
+
+		ext := filepath.Ext(handler.Filename)
+		filename := uuid.New().String() + ext
+		filePath := "./uploads/" + filename
+
+		outFile, err := os.Create(filePath)
+		if err != nil {
+			writeGeneralResponse(w, "error", "Failed to save file", nil, http.StatusInternalServerError)
+			return
+		}
+		defer outFile.Close()
+
+		_, err = io.Copy(outFile, file)
+		if err != nil {
+			writeGeneralResponse(w, "error", "Failed to save file content", nil, http.StatusInternalServerError)
+			return
+		}
+
+		url := "http://localhost:8080/uploads/" + filename
+		photoURL = &url
+	}
+
+	// Получить userID из токена (пример)
+	userID, err := auth.ExtractUserIDFromRequest(r)
+	if err != nil {
+		writeGeneralResponse(w, "error", "Unauthorized", nil, http.StatusUnauthorized)
+		return
+	}
+
+	todo := models.Todo{
+		Title:    title,
+		Done:     done,
+		UserID:   userID,
+		PhotoURL: photoURL,
+	}
+
 	created, err := h.Store.CreateTodo(todo)
 	if err != nil {
 		writeGeneralResponse(w, "error", "Failed to create todo", nil, http.StatusInternalServerError)
@@ -128,16 +189,83 @@ func (h *TodoHandler) createTodo(w http.ResponseWriter, r *http.Request) {
 // @Failure      404   {object}  models.GeneralResponse
 // @Router       /todos/{id} [put]
 func (h *TodoHandler) updateTodo(w http.ResponseWriter, r *http.Request, id int) {
-	var updated models.Todo
-	if err := json.NewDecoder(r.Body).Decode(&updated); err != nil {
-		writeGeneralResponse(w, "error", "Invalid JSON", nil, http.StatusBadRequest)
+	err := r.ParseMultipartForm(10 << 20)
+	if err != nil {
+		writeGeneralResponse(w, "error", "Failed to parse form", nil, http.StatusBadRequest)
 		return
 	}
-	todo, err := h.Store.UpdateTodo(id, updated)
+
+	title := r.FormValue("title")
+	doneStr := r.FormValue("done")
+	done := doneStr == "true" || doneStr == "1"
+
+	existingTodo, err := h.Store.GetTodoByID(id)
 	if err != nil {
 		writeGeneralResponse(w, "error", "Todo not found", nil, http.StatusNotFound)
 		return
 	}
+
+	photoURL := existingTodo.PhotoURL
+
+	file, handler, err := r.FormFile("photo")
+	if err == nil {
+		defer file.Close()
+		log.Printf("⚙️ Existing photoURL: %v", photoURL)
+
+		// Удаляем старый файл, если он есть
+		if photoURL != nil && *photoURL != "" {
+			parsedURL, err := url.Parse(*photoURL)
+			if err != nil {
+				log.Printf("❌ Invalid photo URL: %v", err)
+			} else {
+				// parsedURL.Path, например: /uploads/filename.jpg
+				filePath := "." + filepath.Clean(parsedURL.Path)
+
+				log.Printf("🗑️ Removing old photo file: %s", filePath)
+
+				err = os.Remove(filePath)
+				if err != nil && !os.IsNotExist(err) {
+					log.Printf("❌ Failed to delete old photo: %v", err)
+				} else {
+					log.Printf("✅ Old photo deleted")
+				}
+			}
+		}
+
+		ext := filepath.Ext(handler.Filename)
+		filename := uuid.New().String() + ext
+		filePath := "./uploads/" + filename
+
+		outFile, err := os.Create(filePath)
+		if err != nil {
+			writeGeneralResponse(w, "error", "Failed to save file", nil, http.StatusInternalServerError)
+			return
+		}
+		defer outFile.Close()
+
+		_, err = io.Copy(outFile, file)
+		if err != nil {
+			writeGeneralResponse(w, "error", "Failed to save file content", nil, http.StatusInternalServerError)
+			return
+		}
+
+		url := "http://localhost:8080/uploads/" + filename
+		photoURL = &url
+	}
+
+	updated := models.Todo{
+		Title:    title,
+		Done:     done,
+		PhotoURL: photoURL,
+		UserID:   existingTodo.UserID,
+	}
+
+	todo, err := h.Store.UpdateTodo(id, updated)
+	if err != nil {
+		writeGeneralResponse(w, "error", "Failed to update todo", nil, http.StatusInternalServerError)
+		return
+	}
+
 	writeGeneralResponse(w, "success", "Todo updated", todo, http.StatusOK)
 }
 

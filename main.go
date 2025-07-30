@@ -21,7 +21,7 @@ import (
 )
 
 func main() {
-	connStr := "host=localhost port=5432 user=postgres password=psw dbname=todo_db sslmode=disable"
+	connStr := "host=localhost port=5432 user=postgres password=nmkl2018 dbname=todo_db sslmode=disable"
 	store := db.NewPostgresStore(connStr)
 
 	// Разделяем хранилища
@@ -34,6 +34,10 @@ func main() {
 	// Регистрируем маршруты
 	todoHandler.RegisterRoutes(r)
 	userHandler.RegisterRoutes(r)
+
+	// Разрешаем отдавать статические файлы из папки "./uploads"
+	// Файлы будут доступны по пути: http://localhost:8080/uploads/<filename>
+	r.PathPrefix("/uploads/").Handler(http.StripPrefix("/uploads/", http.FileServer(http.Dir("./uploads"))))
 
 	// Swagger
 	r.PathPrefix("/swagger/").Handler(httpSwagger.WrapHandler)
