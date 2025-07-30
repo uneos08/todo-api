@@ -104,9 +104,10 @@ func (h *UserHandler) Login(w http.ResponseWriter, r *http.Request) {
 	}
 
 	token, err := auth.CreateJWTToken(user.ID)
-	refreshToken, err := auth.CreateRefreshToken(user.ID)
-	if err != nil {
+	refreshToken, err1 := auth.CreateRefreshToken(user.ID)
+	if err != nil || err1 != nil {
 		writeGeneralResponse(w, "error", "Failed to create refresh token", nil, http.StatusInternalServerError)
+
 		return
 	}
 
